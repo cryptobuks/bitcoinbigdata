@@ -367,6 +367,14 @@ func FakeAddr(_script []byte) string {
 	return addr58
 }
 
+func checkEmpty(_outputs []*btc.TxOut) bool {
+	sum := uint64(0)
+	for _, v := range _outputs{
+		sum += v.Value
+	}
+	return sum == 0
+}
+
 func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 	defer _wg.Done()
 
@@ -400,7 +408,9 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 									balanceMap[o.addr] = balance
 								}
 							} else {
-								log.Fatalln("txID", txID.String(), "hash", hash.String(), "index", index, "blockNum", blockNum)
+								if !checkEmpty(t.TxOut) {
+									log.Fatalln("txID", txID.String(), "hash", hash.String(), "index", index, "blockNum", blockNum)
+								}
 							}
 						} else {
 							log.Fatalln("txID", txID.String(), "hash", hash.String(), "blockNum", blockNum)
@@ -414,8 +424,12 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 					addr := new(tAddr)
 					a := btc.NewAddrFromPkScript(o.Pk_script, false)
 					if a == nil {
-						copy(addr[:], FakeAddr(o.Pk_script))
-						log.Println("[FAKE]", "txID", txID.String(), "i", i, "Value", o.Value, "Pk_script", o.Pk_script)
+						if o.Value > 0 {
+							copy(addr[:], FakeAddr(o.Pk_script))
+							//log.Println("[FAKE]", "txID", txID.String(), "i", i, "Value", o.Value, "Pk_script", len(o.Pk_script))
+						} else {
+							continue
+						}
 					} else {
 						copy(addr[:], a.String())
 					}
