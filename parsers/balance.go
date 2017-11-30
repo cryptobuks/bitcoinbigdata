@@ -14,7 +14,7 @@ import (
 	"bufio"
 	"strings"
 	"sort"
-	//"runtime"
+	"runtime"
 	"github.com/piotrnar/gocoin/lib/others/blockdb"
 )
 
@@ -207,8 +207,7 @@ func (_b *BalanceParser) loadBlock(dat []byte, _wg *sync.WaitGroup) {
 }
 
 func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string) {
-	//cpuNum := runtime.NumCPU()
-	maxQueue := 999999
+	cpuNum := runtime.NumCPU()
 	magicID := [4]byte{0xF9, 0xBE, 0xB4, 0xD9}
 
 	_b.blockNO_ = _blockNO
@@ -220,7 +219,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	_b.prevMap_ = make(map[btc.Uint256]*btc.Block)
 
 	_b.blockNum_ = uint32(0)
-	_b.blocksCh_ = make(chan *btc.Block, maxQueue)
+	_b.blocksCh_ = make(chan *btc.Block, cpuNum)
 
 	_b.unspentMap_ = make(tUnspentMap)
 	// address -> balance
@@ -246,7 +245,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 		waitLoad.Add(1)
 		go _b.loadBlock(dat, waitLoad)
 
-		if i%9999 == 0 {
+		if i%cpuNum == 0 {
 			waitLoad.Wait()
 		}
 	}
@@ -407,36 +406,26 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 								} else {
 									balanceMap[o.addr] = balance
 								}
-							} else {
-								if !checkEmpty(t.TxOut) {
-									log.Fatalln("txID", txID.String(), "hash", hash.String(), "index", index, "blockNum", blockNum)
-								}
 							}
-						} else {
-							log.Fatalln("txID", txID.String(), "hash", hash.String(), "blockNum", blockNum)
 						}
 					}
 				}
 
 				unspent := make(tOutputMap)
 				for i, o := range t.TxOut {
+					if  o.Value == 0 {
+						continue
+					}
 					index := uint16(i)
 					addr := new(tAddr)
 					a := btc.NewAddrFromPkScript(o.Pk_script, false)
 					if a == nil {
-						if o.Value > 0 {
-							copy(addr[:], FakeAddr(o.Pk_script))
-							//log.Println("[FAKE]", "txID", txID.String(), "i", i, "Value", o.Value, "Pk_script", len(o.Pk_script))
-						} else {
-							continue
-						}
+						copy(addr[:], FakeAddr(o.Pk_script))
 					} else {
 						copy(addr[:], a.String())
 					}
 					val := uint64(o.Value)
-					if o.Value > 0 {
-						balanceMap[*addr] = balanceMap[*addr] + val
-					}
+					balanceMap[*addr] = balanceMap[*addr] + val
 					unspent[index] = tOutput{*addr, val}
 				}
 				unspentMap[txID] = unspent
