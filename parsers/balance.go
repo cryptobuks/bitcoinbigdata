@@ -56,7 +56,7 @@ type BalanceParser struct {
 	balanceMap_ tBalanceMap
 
 	blocksCh_ chan *btc.Block
-	prevMap_  map[[btc.Uint256IdxLen]byte]*btc.Block
+	prevMap_  map[btc.Uint256]*btc.Block
 
 	fileList_ []int
 	blockNum_ uint32
@@ -217,7 +217,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	_b.fileList_ = make([]int, 0)
 	_b.fileNO_ = -1
 
-	_b.prevMap_ = make(map[[btc.Uint256IdxLen]byte]*btc.Block)
+	_b.prevMap_ = make(map[btc.Uint256]*btc.Block)
 
 	_b.blockNum_ = uint32(0)
 	_b.blocksCh_ = make(chan *btc.Block, maxQueue)
@@ -229,7 +229,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	// Specify blocks directory
 	blockDatabase := blockdb.NewBlockDB(_dataDir+"/blocks", magicID)
 
-	end_block := 300000
+	end_block := 500000
 
 	waitProcess := new(sync.WaitGroup)
 	waitProcess.Add(1)
@@ -359,7 +359,7 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 	defer _wg.Done()
 
 	genesis := new(btc.Uint256)
-	prev := genesis.BIdx()
+	prev := *genesis
 	blockNum := 0
 	logBlock := 0
 	for {
@@ -388,10 +388,10 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 									balanceMap[o.addr] = balance
 								}
 							} else {
-								log.Fatalln("txID", txID, "hash", hash.String(), "index", index, "blockNum", blockNum)
+								log.Fatalln("txID", txID.String(), "hash", hash.String(), "index", index, "blockNum", blockNum)
 							}
 						} else {
-							log.Fatalln("txID", txID, "hash", hash.String(), "blockNum", blockNum)
+							log.Fatalln("txID", txID.String(), "hash", hash.String(), "blockNum", blockNum)
 						}
 					}
 				}
@@ -411,18 +411,18 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 			}
 			delete(_b.prevMap_, prev)
 
-			prev = block.Hash.BIdx()
+			prev = *block.Hash
 
-			if logBlock != blockNum/1000 {
+			if blockNum > logBlock+1000 {
 				log.Println("[OK]block", block.Hash.String(), "blockNum", blockNum, "unspentMap_", len(_b.unspentMap_), "balanceMap_", len(_b.balanceMap_))
-				logBlock = blockNum / 1000
+				logBlock = blockNum
 			}
 		} else {
 			block := <-_b.blocksCh_
 			blockNum++
 
 			parent := btc.NewUint256(block.ParentHash())
-			_b.prevMap_[parent.BIdx()] = block
+			_b.prevMap_[*parent] = block
 			//if logBlock != blockNum/1000 {
 			//	log.Println("[RECIEVED]block", block.Hash.String(), "blockNum", blockNum, "unspentMap_", len(_b.unspentMap_), "balanceMap_", len(_b.balanceMap_))
 			//	logBlock = blockNum / 1000
