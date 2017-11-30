@@ -398,12 +398,14 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 
 				unspent := make(tOutputMap)
 				for i, o := range t.TxOut {
-					if a := btc.NewAddrFromPkScript(o.Pk_script, false); a != nil && o.Value > 0 {
+					if a := btc.NewAddrFromPkScript(o.Pk_script, false); a != nil {
 						index := uint16(i)
 						addr := new(tAddr)
 						copy(addr[:], a.String())
 						val := uint64(o.Value)
-						balanceMap[*addr] = balanceMap[*addr] + val
+						if o.Value > 0 {
+							balanceMap[*addr] = balanceMap[*addr] + val
+						}
 						unspent[index] = tOutput{*addr, val}
 					}
 				}
@@ -417,16 +419,12 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 				log.Println("[OK]block", block.Hash.String(), "blockNum", blockNum, "unspentMap_", len(_b.unspentMap_), "balanceMap_", len(_b.balanceMap_))
 				logBlock = blockNum
 			}
+			blockNum++
 		} else {
 			block := <-_b.blocksCh_
-			blockNum++
 
 			parent := btc.NewUint256(block.ParentHash())
 			_b.prevMap_[*parent] = block
-			//if logBlock != blockNum/1000 {
-			//	log.Println("[RECIEVED]block", block.Hash.String(), "blockNum", blockNum, "unspentMap_", len(_b.unspentMap_), "balanceMap_", len(_b.balanceMap_))
-			//	logBlock = blockNum / 1000
-			//}
 		}
 	}
 }
