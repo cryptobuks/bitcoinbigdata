@@ -355,6 +355,18 @@ func (_b *BalanceParser) saveMap(_files uint32) {
 	wg.Wait()
 }
 
+func FakeAddr(_script []byte) string {
+	hash := make([]byte, 20)
+	btc.RimpHash(_script, hash)
+
+	var ad [25]byte
+	copy(ad[1:21], hash)
+	sh := btc.Sha2Sum(ad[0:21])
+	copy(ad[21:25], sh[:4])
+	addr58 := btc.Encodeb58(ad[:])
+	return addr58
+}
+
 func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 	defer _wg.Done()
 
@@ -398,16 +410,20 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 
 				unspent := make(tOutputMap)
 				for i, o := range t.TxOut {
-					if a := btc.NewAddrFromPkScript(o.Pk_script, false); a != nil {
-						index := uint16(i)
-						addr := new(tAddr)
+					index := uint16(i)
+					addr := new(tAddr)
+					a := btc.NewAddrFromPkScript(o.Pk_script, false)
+					if a == nil {
+						copy(addr[:], FakeAddr(o.Pk_script))
+						log.Println("[FAKE]", "txID", txID.String(), "i", i, "Value", o.Value, "Pk_script", o.Pk_script)
+					} else {
 						copy(addr[:], a.String())
-						val := uint64(o.Value)
-						if o.Value > 0 {
-							balanceMap[*addr] = balanceMap[*addr] + val
-						}
-						unspent[index] = tOutput{*addr, val}
 					}
+					val := uint64(o.Value)
+					if o.Value > 0 {
+						balanceMap[*addr] = balanceMap[*addr] + val
+					}
+					unspent[index] = tOutput{*addr, val}
 				}
 				unspentMap[txID] = unspent
 			}
