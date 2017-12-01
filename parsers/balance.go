@@ -16,12 +16,12 @@ import (
 	"sort"
 	"runtime"
 	"github.com/piotrnar/gocoin/lib/others/blockdb"
+	"time"
+	"github.com/forchain/bitcoinbigdata/lib"
 )
 
-type tAddr [58]byte
-
 type tOutput struct {
-	addr tAddr  // index
+	addr string // index
 	val  uint64 // val
 }
 
@@ -32,7 +32,7 @@ type tOutputMap map[uint16]tOutput
 type tUnspentMap map[btc.Uint256]tOutputMap
 
 // add -> balance
-type tBalanceMap map[tAddr]uint64
+type tBalanceMap map[string]uint64
 
 type tPrev2Spent struct {
 	final bool
@@ -90,11 +90,10 @@ func (_b *BalanceParser) loadUnspent(_path string, _wg *sync.WaitGroup) {
 			for _, output := range outputs {
 				if tokens := strings.Split(output, " "); len(tokens) == 3 {
 					if index, err := strconv.Atoi(tokens[0]); err == nil {
-						addr := new(tAddr)
-						copy(addr[:], tokens[1])
+						addr := tokens[1]
 						if val, err := strconv.ParseUint(tokens[2], 10, 0); err == nil {
 							out[uint16(index)] = tOutput{
-								*addr,
+								addr,
 								val,
 							}
 						}
@@ -134,10 +133,9 @@ func (_b *BalanceParser) loadBalance(_path string, _wg *sync.WaitGroup) {
 		l := scanner.Text()
 
 		if tokens := strings.Split(l, " "); len(tokens) == 2 {
-			addr := new(tAddr)
-			copy(addr[:], tokens[0])
+			addr := tokens[0]
 			if balance, err := strconv.ParseUint(tokens[1], 10, 0); err == nil {
-				_b.balanceMap_[*addr] = balance
+				_b.balanceMap_[addr] = balance
 			}
 		}
 	}
@@ -366,12 +364,90 @@ func FakeAddr(_script []byte) string {
 	return addr58
 }
 
-func checkEmpty(_outputs []*btc.TxOut) bool {
-	sum := uint64(0)
-	for _, v := range _outputs{
-		sum += v.Value
+func (_b *BalanceParser) saveByAddress(_blockTime time.Time) {
+
+	lastDate := _blockTime.Add(-time.Hour * 24)
+
+	fileName := fmt.Sprintf("%v/balance.csv", _b.outDir_)
+	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
 	}
-	return sum == 0
+	defer f.Close()
+
+	fileName100 := fmt.Sprintf("%v/balance100.csv", _b.outDir_)
+	f100, err := os.OpenFile(fileName100, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f100.Close()
+
+	fileName1000 := fmt.Sprintf("%v/balance1000.csv", _b.outDir_)
+	f1000, err := os.OpenFile(fileName1000, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f1000.Close()
+
+	fileName10000 := fmt.Sprintf("%v/balance10000.csv", _b.outDir_)
+	f10000, err := os.OpenFile(fileName10000, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f10000.Close()
+
+	fileName100000 := fmt.Sprintf("%v/balance100000.csv", _b.outDir_)
+	f100000, err := os.OpenFile(fileName100000, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f100000.Close()
+
+	topList := new(lib.TopList)
+	topList.Init(100000)
+	balanceNum := len(_b.balanceMap_)
+	balanceSum := uint64(0)
+	for _, v := range _b.balanceMap_ {
+		balanceSum += v
+		topList.Push(v)
+	}
+	line := fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), balanceNum, balanceSum)
+	if _, err = f.WriteString(line); err != nil {
+		log.Fatalln(err, line)
+	}
+	log.Println("[ALL]", line)
+
+	top := topList.Sorted()
+	sum := uint64(0)
+	for k, v := range top {
+		sum += v
+		if k == 99 {
+			line = fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), sum, float64(sum)/float64(balanceSum))
+			if _, err = f100.WriteString(line); err != nil {
+				log.Fatalln(err, line)
+			}
+			log.Println("[100]", line)
+		} else if k == 999 {
+			line = fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), sum, float64(sum)/float64(balanceSum))
+			if _, err = f1000.WriteString(line); err != nil {
+				log.Fatalln(err, line)
+			}
+			log.Println("[1000]", line)
+		} else if k == 9999 {
+			line = fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), sum, float64(sum)/float64(balanceSum))
+			if _, err = f10000.WriteString(line); err != nil {
+				log.Fatalln(err, line)
+			}
+			log.Println("[10000]", line)
+		}
+	}
+	if len(top) >= 100000 {
+		line = fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), sum, float64(sum)/float64(balanceSum))
+		if _, err = f100000.WriteString(line); err != nil {
+			log.Fatalln(err, line)
+		}
+		log.Println("[100000]", line)
+	}
 }
 
 func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
@@ -380,11 +456,18 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 	genesis := new(btc.Uint256)
 	prev := *genesis
 	blockNum := 0
-	logBlock := 0
+	lastMonth := time.January
 	for {
 		unspentMap := _b.unspentMap_
 		balanceMap := _b.balanceMap_
+
 		if block, ok := _b.prevMap_[prev]; ok {
+			blockTime := time.Unix(int64(block.BlockTime()), 0)
+			if blockTime.Month() != lastMonth {
+				_b.saveByAddress(blockTime)
+				lastMonth = blockTime.Month()
+			}
+
 			for _, t := range block.Txs {
 				txID := *t.Hash
 
@@ -413,20 +496,20 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 
 				unspent := make(tOutputMap)
 				for i, o := range t.TxOut {
-					if  o.Value == 0 {
+					if o.Value == 0 {
 						continue
 					}
 					index := uint16(i)
-					addr := new(tAddr)
+					addr := ""
 					a := btc.NewAddrFromPkScript(o.Pk_script, false)
 					if a == nil {
-						copy(addr[:], FakeAddr(o.Pk_script))
+						addr = FakeAddr(o.Pk_script)
 					} else {
-						copy(addr[:], a.String())
+						addr = a.String()
 					}
 					val := uint64(o.Value)
-					balanceMap[*addr] = balanceMap[*addr] + val
-					unspent[index] = tOutput{*addr, val}
+					balanceMap[addr] = balanceMap[addr] + val
+					unspent[index] = tOutput{addr, val}
 				}
 				unspentMap[txID] = unspent
 			}
@@ -434,10 +517,6 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 
 			prev = *block.Hash
 
-			if blockNum > logBlock+1000 {
-				log.Println("[OK]block", block.Hash.String(), "blockNum", blockNum, "unspentMap_", len(_b.unspentMap_), "balanceMap_", len(_b.balanceMap_))
-				logBlock = blockNum
-			}
 			blockNum++
 		} else {
 			block := <-_b.blocksCh_
