@@ -226,14 +226,17 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	// Specify blocks directory
 	blockDatabase := blockdb.NewBlockDB(_dataDir+"/blocks", magicID)
 
-	end_block := 500000
+	endBlock := 100 * 10000
 
 	waitProcess := new(sync.WaitGroup)
 	waitProcess.Add(1)
 	go _b.processBlock(waitProcess)
 
+	os.RemoveAll(_outDir)
+	os.Mkdir(_outDir, os.ModePerm)
+
 	waitLoad := new(sync.WaitGroup)
-	for i := 0; i < end_block+1; i++ {
+	for i := 0; i < endBlock; i++ {
 
 		dat, er := blockDatabase.FetchNextBlock()
 		if dat == nil || er != nil {
@@ -249,6 +252,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	}
 
 	waitLoad.Wait()
+	close(_b.blocksCh_)
 	waitProcess.Wait()
 
 	log.Print("balance number:", len(_b.balanceMap_))
@@ -343,7 +347,7 @@ func (_b *BalanceParser) saveMap(_files uint32) {
 
 	path := fmt.Sprintf("%v/%v.%v", _b.outDir_, _files, _b.blockNum_)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		os.Mkdir(path, 0755)
+		os.Mkdir(path, os.ModePerm)
 	}
 
 	go _b.saveBalance(wg, path)
@@ -364,8 +368,7 @@ func FakeAddr(_script []byte) string {
 	return addr58
 }
 
-func (_b *BalanceParser) saveByAddress(_blockTime time.Time) {
-
+func (_b *BalanceParser) saveReport(_blockTime time.Time, _sumReward uint64, _sumFee uint64) {
 	lastDate := _blockTime.Add(-time.Hour * 24)
 
 	fileName := fmt.Sprintf("%v/balance.csv", _b.outDir_)
@@ -448,6 +451,19 @@ func (_b *BalanceParser) saveByAddress(_blockTime time.Time) {
 		}
 		log.Println("[100000]", line)
 	}
+
+	fileNameReward := fmt.Sprintf("%v/reward.csv", _b.outDir_)
+	fReward, err := os.OpenFile(fileNameReward, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer fReward.Close()
+
+	line = fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), _sumReward, _sumFee)
+	if _, err = fReward.WriteString(line); err != nil {
+		log.Fatalln(err, line)
+	}
+	log.Println("[REWARD]", line)
 }
 
 func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
@@ -457,6 +473,11 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 	prev := *genesis
 	blockNum := 0
 	lastMonth := time.January
+	sumReward := uint64(0)
+	sumFee := uint64(0)
+	halvingRate := 1.0
+	halvingBlocks := 210000
+	maxReward := 50 * 1e8
 	for {
 		unspentMap := _b.unspentMap_
 		balanceMap := _b.balanceMap_
@@ -464,15 +485,28 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 		if block, ok := _b.prevMap_[prev]; ok {
 			blockTime := time.Unix(int64(block.BlockTime()), 0)
 			if blockTime.Month() != lastMonth {
-				_b.saveByAddress(blockTime)
+				_b.saveReport(blockTime, sumReward, sumFee)
 				lastMonth = blockTime.Month()
+				sumFee = 0
+				sumReward = 0
 			}
 
 			for _, t := range block.Txs {
 				txID := *t.Hash
-
-				for _, i := range t.TxIn {
-					if int32(i.Input.Vout) >= 0 {
+				if t.IsCoinBase() {
+					if (blockNum+1)%halvingBlocks == 0 {
+						halvingRate /= 2
+					}
+					reward := uint64(halvingRate * float64(maxReward))
+					sumReward += reward
+					sumOut := uint64(0)
+					for _, v := range t.TxOut {
+						sumOut += v.Value
+					}
+					fee := sumOut - reward
+					sumFee += fee
+				} else {
+					for _, i := range t.TxIn {
 						hash := *btc.NewUint256(i.Input.Hash[:])
 						index := uint16(i.Input.Vout)
 						if unspent, ok := unspentMap[hash]; ok {
@@ -519,7 +553,10 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 
 			blockNum++
 		} else {
-			block := <-_b.blocksCh_
+			block, ok := <-_b.blocksCh_
+			if !ok {
+				break
+			}
 
 			parent := btc.NewUint256(block.ParentHash())
 			_b.prevMap_[*parent] = block

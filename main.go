@@ -11,7 +11,7 @@ func main() {
 	var home string
 	var out string
 	flag.StringVar(&home, "home", sys.BitcoinHome(), "Bitcoin data path")
-	flag.StringVar(&out, "out", "/tmp", "Out path")
+	flag.StringVar(&out, "out", "/tmp/out", "Out path")
 	flag.BoolVar(&help, "help", help, "Show help")
 	flag.Parse()
 
