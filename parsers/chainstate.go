@@ -1,0 +1,164 @@
+package parsers
+
+import (
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/opt"
+	"log"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+
+	"github.com/forchain/bitcoinbigdata/lib"
+	"encoding/hex"
+	"github.com/piotrnar/gocoin/lib/btc"
+	"sync"
+	"sort"
+	"runtime"
+)
+
+type tKV struct {
+	key string
+	val uint64
+}
+
+//type tBalanceList []tKV
+//
+//func (h tBalanceList) Len() int           { return len(h) }
+//func (h tBalanceList) Less(i, j int) bool { return h[i].val > h[j].val }
+//func (h tBalanceList) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+type ChainStateParser struct {
+	db_           *leveldb.DB
+	balanceMap_   tBalanceMap
+	kvChan_       chan tKV
+	obfuscateKey_ []byte
+	balanceList_  lib.Uint64Sorted
+}
+
+func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
+	defer _wg.Done()
+
+	for kv := range _c.kvChan_ {
+		_c.balanceMap_[kv.key] += kv.val
+	}
+
+	balanceList := make(lib.Uint64Sorted, 0)
+	for _, v := range _c.balanceMap_ {
+		balanceList = append(balanceList, v)
+	}
+	sort.Sort(balanceList)
+	_c.balanceList_ = balanceList
+
+	divide := len(balanceList) / 1000
+	n := 0
+	sum := uint64(0)
+	divideSum := uint64(0)
+	for k, v := range balanceList {
+		n = k + 1
+		sum += v
+		divideSum += v
+		if n == 1000 {
+			log.Println("[1000]", sum)
+		} else if n == 10000 {
+			log.Println("[10000]", sum)
+		} else if n == 100000 {
+			log.Println("[100000]", sum)
+		}
+
+		if n%divide == 0 {
+			log.Printf("[%v]%v", n, divideSum)
+			divideSum = 0
+		}
+	}
+}
+
+func (_c *ChainStateParser) parseUTXO(_key, _val []byte, _wg *sync.WaitGroup) {
+	defer _wg.Done()
+
+	if _key[0] != 'C' {
+		return
+	}
+	h := new(chainhash.Hash)
+
+	if err := h.SetBytes(_key[1:33]); err == nil {
+		//varIndex := _key[33:]
+		//index, _ := lib.DeserializeVLQ(varIndex)
+
+		decrypted := lib.Xor(_val, _c.obfuscateKey_)
+
+		_, offset1 := lib.DeserializeVLQ(decrypted)
+
+		amount, offset2 := lib.DeserializeVLQ(decrypted[offset1:])
+		amount = lib.DecompressTxOutAmount(amount)
+
+		script := lib.DecompressScript(decrypted[offset1+offset2:], 0)
+		addr := btc.NewAddrFromPkScript(script, false)
+
+		addrKey := ""
+		if addr == nil {
+			addrKey = string(script)
+		} else {
+			addrKey = addr.String()
+		}
+
+		kv := tKV{addrKey, amount}
+		_c.kvChan_ <- kv
+
+	} else {
+		log.Println(err)
+	}
+}
+
+func (_c *ChainStateParser) Parse(_home string, _out string) {
+	db, err := leveldb.OpenFile(_home+"/chainstate/", &opt.Options{ReadOnly: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+	_c.db_ = db
+
+	i := 0
+
+	h, err := hex.DecodeString("0e00")
+	if err != nil {
+		log.Fatal(err)
+	}
+	h = append(h, "obfuscate_key"...)
+
+	ro := new(opt.ReadOptions)
+	obfuscateKey, err := db.Get(h, ro)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cpuNum := runtime.NumCPU()
+	_c.obfuscateKey_ = obfuscateKey[1:]
+	_c.kvChan_ = make(chan tKV, cpuNum)
+	_c.balanceMap_ = make(tBalanceMap)
+
+	log.Println("[START]", "cpuNum", cpuNum, "obfuscateKey_", _c.obfuscateKey_)
+
+	wgProcess := new(sync.WaitGroup)
+	wgProcess.Add(1)
+	go _c.processUTXO(wgProcess)
+
+	it := db.NewIterator(nil, ro)
+	wgParse := new(sync.WaitGroup)
+	for it.Next() {
+		wgParse.Add(1)
+		key := make([]byte, len(it.Key()))
+		copy(key, it.Key())
+
+		val := make([]byte, len(it.Value()))
+		copy(val, it.Value())
+
+		go _c.parseUTXO(key, val, wgParse)
+
+		//if i > 1000000 {
+		//	break
+		//}
+		i++
+	}
+	wgParse.Wait()
+	close(_c.kvChan_)
+	wgProcess.Wait()
+
+	log.Println(len(_c.balanceMap_))
+	log.Println(len(_c.balanceList_))
+}

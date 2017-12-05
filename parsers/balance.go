@@ -31,9 +31,6 @@ type tOutputMap map[uint16]tOutput
 // tx -> tOutputMap
 type tUnspentMap map[btc.Uint256]tOutputMap
 
-// add -> balance
-type tBalanceMap map[string]uint64
-
 type tPrev2Spent struct {
 	final bool
 	prev  string
