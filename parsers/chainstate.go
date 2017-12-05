@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sort"
 	"runtime"
+	"fmt"
+	"os"
 )
 
 type tKV struct {
@@ -31,6 +33,9 @@ type ChainStateParser struct {
 	kvChan_       chan tKV
 	obfuscateKey_ []byte
 	balanceList_  lib.Uint64Sorted
+
+	home_ string
+	out_  string
 }
 
 func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
@@ -51,21 +56,65 @@ func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
 	n := 0
 	sum := uint64(0)
 	divideSum := uint64(0)
+	report := make(map[int]uint64)
+	sum1000, sum10000, sum100000 := uint64(0), uint64(0), uint64(0)
+	divideKeys := make([]int, 0)
+	divideVals := make([]uint64, 0)
 	for k, v := range balanceList {
 		n = k + 1
 		sum += v
 		divideSum += v
+
 		if n == 1000 {
-			log.Println("[1000]", sum)
+			sum1000 = sum
 		} else if n == 10000 {
-			log.Println("[10000]", sum)
+			sum10000 = sum
 		} else if n == 100000 {
-			log.Println("[100000]", sum)
+			sum100000 = sum
 		}
 
 		if n%divide == 0 {
-			log.Printf("[%v]%v", n, divideSum)
+			divideKeys = append(divideKeys, n)
+			divideVals = append(divideVals, divideSum)
+			report[n] = divideSum
 			divideSum = 0
+		}
+	}
+
+	fileName := fmt.Sprintf("%v/hold.csv", _c.out_)
+	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	defer f.Close()
+
+	line := fmt.Sprintf("1000,%v,%v\n", sum1000, float64(sum1000)/float64(sum))
+	if _, err = f.WriteString(line); err != nil {
+		log.Fatalln(err, line)
+	} else {
+		log.Print(line)
+	}
+	line = fmt.Sprintf("10000,%v,%v\n", sum10000, float64(sum10000)/float64(sum))
+	if _, err = f.WriteString(line); err != nil {
+		log.Fatalln(err, line)
+	} else {
+		log.Print(line)
+	}
+	line = fmt.Sprintf("100000,%v,%v\n", sum100000, float64(sum100000)/float64(sum))
+	if _, err = f.WriteString(line); err != nil {
+		log.Fatalln(err, line)
+	} else {
+		log.Print(line)
+	}
+
+	for k, key := range divideKeys {
+		val := divideVals[k]
+		line = fmt.Sprintf("%v,%v,%v\n", key, val, float64(val)/float64(sum))
+		if _, err = f.WriteString(line); err != nil {
+			log.Fatalln(err, line)
+		} else {
+			log.Print(line)
 		}
 	}
 }
@@ -127,12 +176,18 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	os.RemoveAll(_out)
+	os.Mkdir(_out, os.ModePerm)
+
+	_c.home_ = _home
+	_c.out_ = _out
 	cpuNum := runtime.NumCPU()
 	_c.obfuscateKey_ = obfuscateKey[1:]
 	_c.kvChan_ = make(chan tKV, cpuNum)
 	_c.balanceMap_ = make(tBalanceMap)
 
-	log.Println("[START]", "cpuNum", cpuNum, "obfuscateKey_", _c.obfuscateKey_)
+	log.Println("[START]", "cpuNum", cpuNum, "obfuscateKey_", _c.obfuscateKey_, "home_", _c.home_, "out_", _c.out_)
 
 	wgProcess := new(sync.WaitGroup)
 	wgProcess.Add(1)
@@ -150,7 +205,7 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 
 		go _c.parseUTXO(key, val, wgParse)
 
-		//if i > 1000000 {
+		//if i > 200000 {
 		//	break
 		//}
 		i++
