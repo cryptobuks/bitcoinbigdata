@@ -207,14 +207,14 @@ func (_c *ChainStateParser) parseUTXO(_key, _val []byte, _wg *sync.WaitGroup) {
 	}
 }
 
-func (_c *ChainStateParser) Parse(_home string, _out string) {
+func (_c *ChainStateParser) Parse(_home string, _out string, _max uint32) {
 	ldb, err := leveldb.OpenFile(_home+"/chainstate/", &opt.Options{ReadOnly: true})
 	if err != nil {
 		log.Fatal(err)
 	}
 	_c.db_ = ldb
 
-	i := 0
+	i := uint32(0)
 
 	h, err := hex.DecodeString("0e00")
 	if err != nil {
@@ -237,6 +237,7 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 
 	bestBlock, err := ldb.Get([]byte{'B'}, ro)
 	if err != nil {
+		log.Println("please make sure bitcoin stopped")
 		log.Fatal(err)
 	}
 	decrypted := lib.Xor(bestBlock, _c.obfuscateKey_)
@@ -274,7 +275,7 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 
 		go _c.parseUTXO(key, val, wgParse)
 
-		if i > 200000 {
+		if _max > 0 && i > _max {
 			break
 		}
 		i++
