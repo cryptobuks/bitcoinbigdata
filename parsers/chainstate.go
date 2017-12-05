@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"fmt"
 	"os"
+	"github.com/ruqqq/blockchainparser/db"
 )
 
 type tKV struct {
@@ -36,6 +37,9 @@ type ChainStateParser struct {
 
 	home_ string
 	out_  string
+
+	periodList_ [721]uint64
+	bestHeight_ uint32
 }
 
 func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
@@ -44,6 +48,44 @@ func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
 	for kv := range _c.kvChan_ {
 		_c.balanceMap_[kv.key] += kv.val
 	}
+
+	log.Println("[UTXO]", len(_c.balanceMap_))
+
+	_c.saveReport()
+}
+
+func (_c *ChainStateParser) saveReport() {
+	wg := new(sync.WaitGroup)
+	wg.Add(2)
+	_c.saveHold(wg)
+	_c.savePeriod(wg)
+	wg.Wait()
+}
+
+func (_c *ChainStateParser) savePeriod(_wg *sync.WaitGroup) {
+	defer _wg.Done()
+
+	fileName := fmt.Sprintf("%v/period.csv", _c.out_)
+	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f.Close()
+
+	for k, v := range _c.periodList_ {
+		line := fmt.Sprintf("%v,%v\n", k, v)
+		if _, err = f.WriteString(line); err != nil {
+			log.Fatalln(err, line)
+		} else {
+			log.Print(line)
+		}
+	}
+
+	log.Println("[PERIOD]", fileName)
+}
+
+func (_c *ChainStateParser) saveHold(_wg *sync.WaitGroup) {
+	defer _wg.Done()
 
 	balanceList := make(lib.Uint64Sorted, 0)
 	for _, v := range _c.balanceMap_ {
@@ -56,7 +98,6 @@ func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
 	n := 0
 	sum := uint64(0)
 	divideSum := uint64(0)
-	report := make(map[int]uint64)
 	sum1000, sum10000, sum100000 := uint64(0), uint64(0), uint64(0)
 	divideKeys := make([]int, 0)
 	divideVals := make([]uint64, 0)
@@ -76,7 +117,6 @@ func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
 		if n%divide == 0 {
 			divideKeys = append(divideKeys, n)
 			divideVals = append(divideVals, divideSum)
-			report[n] = divideSum
 			divideSum = 0
 		}
 	}
@@ -117,6 +157,8 @@ func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
 			log.Print(line)
 		}
 	}
+
+	log.Println("[HOLD]", fileName)
 }
 
 func (_c *ChainStateParser) parseUTXO(_key, _val []byte, _wg *sync.WaitGroup) {
@@ -133,7 +175,16 @@ func (_c *ChainStateParser) parseUTXO(_key, _val []byte, _wg *sync.WaitGroup) {
 
 		decrypted := lib.Xor(_val, _c.obfuscateKey_)
 
-		_, offset1 := lib.DeserializeVLQ(decrypted)
+		code, offset1 := lib.DeserializeVLQ(decrypted)
+		height := uint32(code >> 1)
+		//codeBase := code & 1
+
+		dist := _c.bestHeight_ - height
+		if period := dist / 144; period < 720 {
+			_c.periodList_[period] += 1
+		} else {
+			_c.periodList_[720] += 1
+		}
 
 		amount, offset2 := lib.DeserializeVLQ(decrypted[offset1:])
 		amount = lib.DecompressTxOutAmount(amount)
@@ -157,11 +208,11 @@ func (_c *ChainStateParser) parseUTXO(_key, _val []byte, _wg *sync.WaitGroup) {
 }
 
 func (_c *ChainStateParser) Parse(_home string, _out string) {
-	db, err := leveldb.OpenFile(_home+"/chainstate/", &opt.Options{ReadOnly: true})
+	ldb, err := leveldb.OpenFile(_home+"/chainstate/", &opt.Options{ReadOnly: true})
 	if err != nil {
 		log.Fatal(err)
 	}
-	_c.db_ = db
+	_c.db_ = ldb
 
 	i := 0
 
@@ -172,10 +223,25 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 	h = append(h, "obfuscate_key"...)
 
 	ro := new(opt.ReadOptions)
-	obfuscateKey, err := db.Get(h, ro)
+	obfuscateKey, err := ldb.Get(h, ro)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	bestBlock, err := ldb.Get([]byte{'B'}, ro)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	indexDB, err := db.OpenIndexDb(_home)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	bi, err := db.GetBlockIndexRecord(indexDB, bestBlock)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	_c.bestHeight_ = uint32(bi.Height)
 
 	os.RemoveAll(_out)
 	os.Mkdir(_out, os.ModePerm)
@@ -193,7 +259,7 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 	wgProcess.Add(1)
 	go _c.processUTXO(wgProcess)
 
-	it := db.NewIterator(nil, ro)
+	it := ldb.NewIterator(nil, ro)
 	wgParse := new(sync.WaitGroup)
 	for it.Next() {
 		wgParse.Add(1)
@@ -213,7 +279,4 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 	wgParse.Wait()
 	close(_c.kvChan_)
 	wgProcess.Wait()
-
-	log.Println(len(_c.balanceMap_))
-	log.Println(len(_c.balanceList_))
 }
