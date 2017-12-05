@@ -228,16 +228,26 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 		log.Fatal(err)
 	}
 
+	_c.home_ = _home
+	_c.out_ = _out
+	cpuNum := runtime.NumCPU()
+	_c.obfuscateKey_ = obfuscateKey[1:]
+	_c.kvChan_ = make(chan tKV, cpuNum)
+	_c.balanceMap_ = make(tBalanceMap)
+
 	bestBlock, err := ldb.Get([]byte{'B'}, ro)
 	if err != nil {
 		log.Fatal(err)
 	}
+	decrypted := lib.Xor(bestBlock, _c.obfuscateKey_)
+	blockHash := new(chainhash.Hash)
+	blockHash.SetBytes(decrypted)
 
 	indexDB, err := db.OpenIndexDb(_home)
 	if err != nil {
 		log.Fatalln(err)
 	}
-	bi, err := db.GetBlockIndexRecord(indexDB, bestBlock)
+	bi, err := db.GetBlockIndexRecord(indexDB, blockHash[:])
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -245,13 +255,6 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 
 	os.RemoveAll(_out)
 	os.Mkdir(_out, os.ModePerm)
-
-	_c.home_ = _home
-	_c.out_ = _out
-	cpuNum := runtime.NumCPU()
-	_c.obfuscateKey_ = obfuscateKey[1:]
-	_c.kvChan_ = make(chan tKV, cpuNum)
-	_c.balanceMap_ = make(tBalanceMap)
 
 	log.Println("[START]", "cpuNum", cpuNum, "obfuscateKey_", _c.obfuscateKey_, "home_", _c.home_, "out_", _c.out_)
 
@@ -271,9 +274,9 @@ func (_c *ChainStateParser) Parse(_home string, _out string) {
 
 		go _c.parseUTXO(key, val, wgParse)
 
-		//if i > 200000 {
-		//	break
-		//}
+		if i > 200000 {
+			break
+		}
 		i++
 	}
 	wgParse.Wait()
