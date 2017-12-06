@@ -20,6 +20,11 @@ import (
 	"github.com/forchain/bitcoinbigdata/lib"
 )
 
+const (
+	HALVING_BLOCKS = 210000
+	MAX_REWARD     = 50.0 * 1e8
+)
+
 type tOutput struct {
 	addr string // index
 	val  uint64 // val
@@ -45,18 +50,26 @@ type tPrev2Spent struct {
 }
 
 type BalanceParser struct {
-	blockNO_ uint32
-	fileNO_  int
-	outDir_  string
+	endBlock_ uint32
+	fileNO_   int
+	outDir_   string
 
 	unspentMap_ tUnspentMap
 	balanceMap_ tBalanceMap
+
+	unspentMapLock_ *sync.RWMutex
+	balanceMapLock_ *sync.RWMutex
 
 	blocksCh_ chan *btc.Block
 	prevMap_  map[btc.Uint256]*btc.Block
 
 	fileList_ []int
 	blockNum_ uint32
+
+	blockNO_     uint32
+	sumReward_   uint64
+	sumFee_      uint64
+	halvingRate_ float64
 }
 
 func (_b *BalanceParser) loadUnspent(_path string, _wg *sync.WaitGroup) {
@@ -157,13 +170,13 @@ func (_b *BalanceParser) loadMap() {
 				if matches := r.FindStringSubmatch(f.Name()); len(matches) == 3 {
 					if fileNO, err := strconv.Atoi(matches[1]); err == nil {
 						if blockNO, err := strconv.Atoi(matches[2]); err == nil {
-							if uint32(blockNO) < _b.blockNO_ {
+							if uint32(blockNO) < _b.endBlock_ {
 								if blockNO > start {
 									start = blockNO
 									fi = f
 									_b.fileNO_ = fileNO
 								}
-							} else if uint32(blockNO) == _b.blockNO_ {
+							} else if uint32(blockNO) == _b.endBlock_ {
 								start = blockNO
 								fi = f
 								_b.fileNO_ = fileNO
@@ -205,7 +218,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	cpuNum := runtime.NumCPU()
 	magicID := [4]byte{0xF9, 0xBE, 0xB4, 0xD9}
 
-	_b.blockNO_ = _blockNO
+	_b.endBlock_ = _blockNO
 
 	_b.outDir_ = _outDir
 	_b.fileList_ = make([]int, 0)
@@ -217,8 +230,15 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	_b.blocksCh_ = make(chan *btc.Block, cpuNum)
 
 	_b.unspentMap_ = make(tUnspentMap)
+	_b.unspentMapLock_ = new(sync.RWMutex)
 	// address -> balance
 	_b.balanceMap_ = make(tBalanceMap)
+	_b.balanceMapLock_ = new(sync.RWMutex)
+
+	_b.blockNO_ = uint32(0)
+	_b.sumReward_ = uint64(0)
+	_b.sumFee_ = uint64(0)
+	_b.halvingRate_ = 1.0
 
 	// Specify blocks directory
 	blockDatabase := blockdb.NewBlockDB(_dataDir+"/blocks", magicID)
@@ -365,7 +385,7 @@ func FakeAddr(_script []byte) string {
 	return addr58
 }
 
-func (_b *BalanceParser) saveReport(_blockTime time.Time, _sumReward uint64, _sumFee uint64) {
+func (_b *BalanceParser) saveReport(_blockTime time.Time) {
 	lastDate := _blockTime.Add(-time.Hour * 24)
 
 	fileName := fmt.Sprintf("%v/balance.csv", _b.outDir_)
@@ -456,11 +476,86 @@ func (_b *BalanceParser) saveReport(_blockTime time.Time, _sumReward uint64, _su
 	}
 	defer fReward.Close()
 
-	line = fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), _sumReward, _sumFee)
+	line = fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), _b.sumReward_, _b.sumFee_)
 	if _, err = fReward.WriteString(line); err != nil {
 		log.Fatalln(err, line)
 	}
 	log.Println("[REWARD]", line)
+}
+
+func (_b *BalanceParser) processTx(_t *btc.Tx, _wg *sync.WaitGroup) {
+	defer _wg.Done()
+
+	txID := *_t.Hash
+	if _t.IsCoinBase() {
+		if (_b.blockNO_+1)%HALVING_BLOCKS == 0 {
+			_b.halvingRate_ /= 2
+		}
+		reward := uint64(_b.halvingRate_ * MAX_REWARD)
+		_b.sumReward_ += reward
+		sumOut := uint64(0)
+		for _, v := range _t.TxOut {
+			sumOut += v.Value
+		}
+		fee := sumOut - reward
+		_b.sumFee_ += fee
+	} else {
+		for _, i := range _t.TxIn {
+			hash := *btc.NewUint256(i.Input.Hash[:])
+			index := uint16(i.Input.Vout)
+
+			var o tOutput
+			var unspent tOutputMap
+			var okUnspent, okOutput bool
+
+			_b.unspentMapLock_.RLock()
+			unspent, okUnspent = _b.unspentMap_[hash]
+			if okUnspent {
+				o, okOutput = unspent[index]
+			}
+			_b.unspentMapLock_.RUnlock()
+
+			if okOutput {
+				_b.unspentMapLock_.Lock()
+				delete(unspent, index)
+				if len(unspent) == 0 {
+					delete(_b.unspentMap_, hash)
+				}
+				_b.unspentMapLock_.Unlock()
+
+				_b.balanceMapLock_.Lock()
+				if balance := _b.balanceMap_[o.addr] - o.val; balance <= 0 {
+					delete(_b.balanceMap_, o.addr)
+				} else {
+					_b.balanceMap_[o.addr] = balance
+				}
+				_b.balanceMapLock_.Unlock()
+			}
+		}
+	}
+
+	unspent := make(tOutputMap)
+	for i, o := range _t.TxOut {
+		if o.Value == 0 {
+			continue
+		}
+		index := uint16(i)
+		addr := ""
+		a := btc.NewAddrFromPkScript(o.Pk_script, false)
+		if a == nil {
+			addr = string(o.Pk_script)
+		} else {
+			addr = a.String()
+		}
+		val := uint64(o.Value)
+		_b.balanceMapLock_.Lock()
+		_b.balanceMap_[addr] = _b.balanceMap_[addr] + val
+		_b.balanceMapLock_.Unlock()
+		unspent[index] = tOutput{addr, val}
+	}
+	_b.unspentMapLock_.Lock()
+	_b.unspentMap_[txID] = unspent
+	_b.unspentMapLock_.Unlock()
 }
 
 func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
@@ -468,87 +563,28 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 
 	genesis := new(btc.Uint256)
 	prev := *genesis
-	blockNum := 0
 	lastMonth := time.January
-	sumReward := uint64(0)
-	sumFee := uint64(0)
-	halvingRate := 1.0
-	halvingBlocks := 210000
-	maxReward := 50 * 1e8
 	for {
-		unspentMap := _b.unspentMap_
-		balanceMap := _b.balanceMap_
-
 		if block, ok := _b.prevMap_[prev]; ok {
 			blockTime := time.Unix(int64(block.BlockTime()), 0)
 			if blockTime.Month() != lastMonth {
-				_b.saveReport(blockTime, sumReward, sumFee)
+				_b.saveReport(blockTime)
 				lastMonth = blockTime.Month()
-				sumFee = 0
-				sumReward = 0
+				_b.sumFee_ = 0
+				_b.sumReward_ = 0
 			}
 
+			wg := new(sync.WaitGroup)
 			for _, t := range block.Txs {
-				txID := *t.Hash
-				if t.IsCoinBase() {
-					if (blockNum+1)%halvingBlocks == 0 {
-						halvingRate /= 2
-					}
-					reward := uint64(halvingRate * float64(maxReward))
-					sumReward += reward
-					sumOut := uint64(0)
-					for _, v := range t.TxOut {
-						sumOut += v.Value
-					}
-					fee := sumOut - reward
-					sumFee += fee
-				} else {
-					for _, i := range t.TxIn {
-						hash := *btc.NewUint256(i.Input.Hash[:])
-						index := uint16(i.Input.Vout)
-						if unspent, ok := unspentMap[hash]; ok {
-							if o, ok := unspent[index]; ok {
-								delete(unspent, index)
-								if len(unspent) == 0 {
-									delete(unspentMap, hash)
-								}
-
-								balance := balanceMap[o.addr]
-								balance -= o.val
-								if balance <= 0 {
-									delete(balanceMap, o.addr)
-								} else {
-									balanceMap[o.addr] = balance
-								}
-							}
-						}
-					}
-				}
-
-				unspent := make(tOutputMap)
-				for i, o := range t.TxOut {
-					if o.Value == 0 {
-						continue
-					}
-					index := uint16(i)
-					addr := ""
-					a := btc.NewAddrFromPkScript(o.Pk_script, false)
-					if a == nil {
-						addr = FakeAddr(o.Pk_script)
-					} else {
-						addr = a.String()
-					}
-					val := uint64(o.Value)
-					balanceMap[addr] = balanceMap[addr] + val
-					unspent[index] = tOutput{addr, val}
-				}
-				unspentMap[txID] = unspent
+				wg.Add(1)
+				go _b.processTx(t, wg)
 			}
+			wg.Wait()
 			delete(_b.prevMap_, prev)
 
 			prev = *block.Hash
 
-			blockNum++
+			_b.blockNO_++
 		} else {
 			block, ok := <-_b.blocksCh_
 			if !ok {

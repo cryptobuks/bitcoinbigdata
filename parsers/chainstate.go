@@ -57,8 +57,8 @@ func (_c *ChainStateParser) processUTXO(_wg *sync.WaitGroup) {
 func (_c *ChainStateParser) saveReport() {
 	wg := new(sync.WaitGroup)
 	wg.Add(2)
-	_c.saveHold(wg)
-	_c.savePeriod(wg)
+	go _c.saveHold(wg)
+	go _c.savePeriod(wg)
 	wg.Wait()
 }
 
