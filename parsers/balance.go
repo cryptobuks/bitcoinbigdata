@@ -49,6 +49,18 @@ type tPrev2Spent struct {
 	spentList  []string
 }
 
+type tChangeSet struct {
+	sumOut     uint64
+	spentMap   map[btc.Uint256][]uint16
+	balanceMap map[btc.Uint256]tOutputMap
+	block      *btc.Block
+}
+
+type tBalanceChange struct {
+	addr   string
+	change int64
+}
+
 type BalanceParser struct {
 	endBlock_ uint32
 	fileNO_   int
@@ -60,8 +72,10 @@ type BalanceParser struct {
 	unspentMapLock_ *sync.RWMutex
 	balanceMapLock_ *sync.RWMutex
 
-	blocksCh_ chan *btc.Block
-	prevMap_  map[btc.Uint256]*btc.Block
+	changeSetCh_     chan *tChangeSet
+	prevMap_         map[btc.Uint256]*tChangeSet
+	balanceChangeCh_ chan *tBalanceChange
+	balanceReadyCh_  chan bool
 
 	fileList_ []int
 	blockNum_ uint32
@@ -211,7 +225,43 @@ func (_b *BalanceParser) loadBlock(dat []byte, _wg *sync.WaitGroup) {
 
 	bl.BuildTxList()
 
-	_b.blocksCh_ <- bl
+	sumOut := uint64(0)
+
+	unspentMap := make(map[btc.Uint256][]uint16)
+	balanceMap := make(map[btc.Uint256]tOutputMap)
+	for _, t := range bl.Txs {
+		txID := *t.Hash
+		if t.IsCoinBase() {
+			for _, v := range t.TxOut {
+				sumOut += v.Value
+			}
+		} else {
+			for _, i := range t.TxIn {
+				hash := *btc.NewUint256(i.Input.Hash[:])
+				index := uint16(i.Input.Vout)
+				unspentMap[hash] = append(unspentMap[hash], index)
+			}
+		}
+
+		outputMap := make(tOutputMap)
+		for i, o := range t.TxOut {
+			if o.Value == 0 {
+				continue
+			}
+			addr := ""
+			a := btc.NewAddrFromPkScript(o.Pk_script, false)
+			if a == nil {
+				addr = string(o.Pk_script)
+			} else {
+				addr = a.String()
+			}
+			val := uint64(o.Value)
+			outputMap[uint16(i)] = tOutput{addr, val}
+		}
+		balanceMap[txID] = outputMap
+	}
+
+	_b.changeSetCh_ <- &tChangeSet{sumOut, unspentMap, balanceMap, bl}
 }
 
 func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string) {
@@ -224,10 +274,13 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	_b.fileList_ = make([]int, 0)
 	_b.fileNO_ = -1
 
-	_b.prevMap_ = make(map[btc.Uint256]*btc.Block)
+	_b.prevMap_ = make(map[btc.Uint256]*tChangeSet)
 
 	_b.blockNum_ = uint32(0)
-	_b.blocksCh_ = make(chan *btc.Block, cpuNum)
+
+	_b.changeSetCh_ = make(chan *tChangeSet)
+	_b.balanceChangeCh_ = make(chan *tBalanceChange, cpuNum)
+	_b.balanceReadyCh_ = make(chan bool)
 
 	_b.unspentMap_ = make(tUnspentMap)
 	_b.unspentMapLock_ = new(sync.RWMutex)
@@ -249,6 +302,8 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	waitProcess.Add(1)
 	go _b.processBlock(waitProcess)
 
+	go _b.processBalance()
+
 	os.RemoveAll(_outDir)
 	os.Mkdir(_outDir, os.ModePerm)
 
@@ -269,7 +324,8 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	}
 
 	waitLoad.Wait()
-	close(_b.blocksCh_)
+	close(_b.changeSetCh_)
+	close(_b.balanceReadyCh_)
 	waitProcess.Wait()
 
 	log.Print("balance number:", len(_b.balanceMap_))
@@ -558,41 +614,90 @@ func (_b *BalanceParser) processTx(_t *btc.Tx, _wg *sync.WaitGroup) {
 	_b.unspentMapLock_.Unlock()
 }
 
+func (_b *BalanceParser) processBalance() {
+	for change := range _b.balanceChangeCh_ {
+		if balance := int64(_b.balanceMap_[change.addr]) + change.change; balance > 0 {
+			_b.balanceMap_[change.addr] = uint64(balance)
+		} else if balance == 0 {
+			delete(_b.balanceMap_, change.addr)
+		} else {
+			log.Fatalln(change.addr, change.change)
+		}
+	}
+
+	_b.balanceReadyCh_ <- true
+}
+
 func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 	defer _wg.Done()
 
 	genesis := new(btc.Uint256)
 	prev := *genesis
 	lastMonth := time.January
+
 	for {
-		if block, ok := _b.prevMap_[prev]; ok {
+		if changeSet, ok := _b.prevMap_[prev]; ok {
+			block := changeSet.block
+
+			if (_b.blockNO_+1)%HALVING_BLOCKS == 0 {
+				_b.halvingRate_ /= 2
+			}
+			reward := uint64(_b.halvingRate_ * MAX_REWARD)
+			_b.sumReward_ += reward
+			fee := changeSet.sumOut - reward
+			_b.sumFee_ += fee
+
 			blockTime := time.Unix(int64(block.BlockTime()), 0)
+
 			if blockTime.Month() != lastMonth {
+				close(_b.balanceChangeCh_)
+				<-_b.balanceReadyCh_
 				_b.saveReport(blockTime)
 				lastMonth = blockTime.Month()
 				_b.sumFee_ = 0
 				_b.sumReward_ = 0
+
+				_b.balanceChangeCh_ = make(chan *tBalanceChange)
+				go _b.processBalance()
 			}
 
-			wg := new(sync.WaitGroup)
-			for _, t := range block.Txs {
-				wg.Add(1)
-				go _b.processTx(t, wg)
+			// must first
+			for txID, outputs := range changeSet.balanceMap {
+				for _, output := range outputs {
+					_b.balanceChangeCh_ <- &tBalanceChange{output.addr, int64(output.val)}
+				}
+				_b.unspentMap_[txID] = outputs
 			}
-			wg.Wait()
+
+			for txID, spent := range changeSet.spentMap {
+				if unspent, ok := _b.unspentMap_[txID]; ok {
+					for _, i := range spent {
+						if output, ok := unspent[i]; ok {
+							delete(unspent, i)
+							_b.balanceChangeCh_ <- &tBalanceChange{output.addr, -int64(output.val)}
+						}
+					}
+					if len(unspent) == 0 {
+						delete(_b.unspentMap_, txID)
+					}
+				}
+			}
+
 			delete(_b.prevMap_, prev)
 
 			prev = *block.Hash
 
 			_b.blockNO_++
 		} else {
-			block, ok := <-_b.blocksCh_
+			changeSet, ok := <-_b.changeSetCh_
 			if !ok {
 				break
 			}
 
+			block := changeSet.block
+
 			parent := btc.NewUint256(block.ParentHash())
-			_b.prevMap_[*parent] = block
+			_b.prevMap_[*parent] = changeSet
 		}
 	}
 }
