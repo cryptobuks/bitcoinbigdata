@@ -331,7 +331,7 @@ func FakeAddr(_script []byte) string {
 func (_b *BalanceParser) saveDayReport(_blockTime time.Time) {
 	delta := time.Now().Sub(_blockTime)
 	days := uint32(delta.Hours() / 24)
-	if days > 720 {
+	if days >= 720 {
 		return
 	}
 
@@ -471,7 +471,7 @@ func (_b *BalanceParser) processBalance(_blockTime *time.Time) {
 		}
 
 		balance := int64(account.balance)
-		if balance >= 1000 && change.change < 0 && _blockTime != nil{
+		if balance >= 1000*1e8 && change.change < 0 && _blockTime != nil {
 			delta := time.Now().Sub(*_blockTime)
 			days := uint32(delta.Hours() / 24)
 			if days <= 720 {
