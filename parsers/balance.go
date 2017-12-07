@@ -9,9 +9,7 @@ import (
 	"os"
 	"log"
 	"compress/gzip"
-	"regexp"
 	"strconv"
-	"bufio"
 	"strings"
 	"sort"
 	"runtime"
@@ -24,6 +22,13 @@ const (
 	HALVING_BLOCKS = 210000
 	MAX_REWARD     = 50.0 * 1e8
 )
+
+type tAccount struct {
+	balance uint64
+	time    uint32
+}
+
+type tAccountMap map[string]tAccount
 
 type tOutput struct {
 	addr string // index
@@ -59,6 +64,7 @@ type tChangeSet struct {
 type tBalanceChange struct {
 	addr   string
 	change int64
+	time   time.Time
 }
 
 type BalanceParser struct {
@@ -67,7 +73,16 @@ type BalanceParser struct {
 	outDir_   string
 
 	unspentMap_ tUnspentMap
-	balanceMap_ tBalanceMap
+	accountMap_ tAccountMap
+
+	reduceNum_ uint32
+	reduceSum_ uint64
+
+	reduceNum2010_ uint32
+	reduceSum2010_ uint64
+
+	reduceNum2014_ uint32
+	reduceSum2014_ uint64
 
 	unspentMapLock_ *sync.RWMutex
 	balanceMapLock_ *sync.RWMutex
@@ -84,134 +99,6 @@ type BalanceParser struct {
 	sumReward_   uint64
 	sumFee_      uint64
 	halvingRate_ float64
-}
-
-func (_b *BalanceParser) loadUnspent(_path string, _wg *sync.WaitGroup) {
-	defer _wg.Done()
-
-	filename := fmt.Sprintf("%v/unspent.gz", _path)
-	f, err := os.Open(filename)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
-	gr, err := gzip.NewReader(f)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer gr.Close()
-
-	scanner := bufio.NewScanner(gr)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1000*1024*1024)
-	for scanner.Scan() {
-		l := scanner.Text()
-		if tokens := strings.Split(l, ","); len(tokens) == 2 {
-			txID := *btc.NewUint256FromString(tokens[0])
-			outputs := tokens[1:]
-
-			out := make(tOutputMap)
-			for _, output := range outputs {
-				if tokens := strings.Split(output, " "); len(tokens) == 3 {
-					if index, err := strconv.Atoi(tokens[0]); err == nil {
-						addr := tokens[1]
-						if val, err := strconv.ParseUint(tokens[2], 10, 0); err == nil {
-							out[uint16(index)] = tOutput{
-								addr,
-								val,
-							}
-						}
-					}
-				}
-			}
-			_b.unspentMap_[txID] = out
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
-	log.Println("loaded", filename)
-}
-
-func (_b *BalanceParser) loadBalance(_path string, _wg *sync.WaitGroup) {
-	defer _wg.Done()
-
-	filename := fmt.Sprintf("%v/balance.gz", _path)
-
-	f, err := os.Open(filename)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
-	gr, err := gzip.NewReader(f)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer gr.Close()
-
-	scanner := bufio.NewScanner(gr)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 100*1024*1024)
-	for scanner.Scan() {
-		l := scanner.Text()
-
-		if tokens := strings.Split(l, " "); len(tokens) == 2 {
-			addr := tokens[0]
-			if balance, err := strconv.ParseUint(tokens[1], 10, 0); err == nil {
-				_b.balanceMap_[addr] = balance
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
-	}
-	log.Println("loaded", filename)
-}
-
-func (_b *BalanceParser) loadMap() {
-	if files, err := ioutil.ReadDir(_b.outDir_); err == nil && len(files) > 0 {
-		start := 0
-		var fi os.FileInfo
-		for _, f := range files {
-			if f.IsDir() {
-				r, err := regexp.Compile("(\\d+)\\.(\\d+)") // Do we have an 'N' or 'index' at the beginning?
-				if err != nil {
-					log.Println(err)
-					break
-				}
-				if matches := r.FindStringSubmatch(f.Name()); len(matches) == 3 {
-					if fileNO, err := strconv.Atoi(matches[1]); err == nil {
-						if blockNO, err := strconv.Atoi(matches[2]); err == nil {
-							if uint32(blockNO) < _b.endBlock_ {
-								if blockNO > start {
-									start = blockNO
-									fi = f
-									_b.fileNO_ = fileNO
-								}
-							} else if uint32(blockNO) == _b.endBlock_ {
-								start = blockNO
-								fi = f
-								_b.fileNO_ = fileNO
-								break
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if start > 0 {
-			wg := new(sync.WaitGroup)
-			wg.Add(2)
-			path := fmt.Sprintf("%v/%v", _b.outDir_, fi.Name())
-			go _b.loadUnspent(path, wg)
-			go _b.loadBalance(path, wg)
-
-			wg.Wait()
-		}
-	}
 }
 
 func (_b *BalanceParser) loadBlock(dat []byte, _wg *sync.WaitGroup) {
@@ -285,7 +172,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	_b.unspentMap_ = make(tUnspentMap)
 	_b.unspentMapLock_ = new(sync.RWMutex)
 	// address -> balance
-	_b.balanceMap_ = make(tBalanceMap)
+	_b.accountMap_ = make(tAccountMap)
 	_b.balanceMapLock_ = new(sync.RWMutex)
 
 	_b.blockNO_ = uint32(0)
@@ -328,7 +215,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	close(_b.balanceReadyCh_)
 	waitProcess.Wait()
 
-	log.Print("balance number:", len(_b.balanceMap_))
+	log.Print("account number:", len(_b.accountMap_))
 	log.Print("unspent number:", len(_b.unspentMap_))
 }
 
@@ -398,8 +285,8 @@ func (_b *BalanceParser) saveBalance(_wg *sync.WaitGroup, _path string) {
 	// if OOM, try delete map item then append to list
 	sorted := make(tSortedBalance, 0)
 
-	for k, v := range _b.balanceMap_ {
-		line := fmt.Sprintln(k, v)
+	for k, v := range _b.accountMap_ {
+		line := fmt.Sprintln(k, v.balance)
 		sorted = append(sorted, line)
 	}
 	sort.Sort(sorted)
@@ -441,7 +328,44 @@ func FakeAddr(_script []byte) string {
 	return addr58
 }
 
-func (_b *BalanceParser) saveReport(_blockTime time.Time) {
+func (_b *BalanceParser) saveDayReport(_blockTime time.Time) {
+	delta := time.Now().Sub(_blockTime)
+	days := uint32(delta.Hours() / 24)
+	if days > 720 {
+		return
+	}
+
+	fileName := fmt.Sprintf("%v/reduce.csv", _b.outDir_)
+	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f.Close()
+	line := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum_, _b.reduceSum_)
+	f.WriteString(line)
+
+	fileName2010 := fmt.Sprintf("%v/reduce2010.csv", _b.outDir_)
+	f2010, err := os.OpenFile(fileName2010, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f.Close()
+	line2010 := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum2010_, _b.reduceSum2010_)
+	f2010.WriteString(line2010)
+
+	fileName2014 := fmt.Sprintf("%v/reduce2014.csv", _b.outDir_)
+	f2014, err := os.OpenFile(fileName2014, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f.Close()
+	line2014 := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum2014_, _b.reduceSum2014_)
+	f2014.WriteString(line2014)
+
+	log.Println("[REDUCE]", line)
+}
+
+func (_b *BalanceParser) saveMonthReport(_blockTime time.Time) {
 	lastDate := _blockTime.Add(-time.Hour * 24)
 
 	fileName := fmt.Sprintf("%v/balance.csv", _b.outDir_)
@@ -481,11 +405,11 @@ func (_b *BalanceParser) saveReport(_blockTime time.Time) {
 
 	topList := new(lib.TopList)
 	topList.Init(100000)
-	balanceNum := len(_b.balanceMap_)
+	balanceNum := len(_b.accountMap_)
 	balanceSum := uint64(0)
-	for _, v := range _b.balanceMap_ {
-		balanceSum += v
-		topList.Push(v)
+	for _, v := range _b.accountMap_ {
+		balanceSum += v.balance
+		topList.Push(v.balance)
 	}
 	line := fmt.Sprintf("%v,%v,%v\n", lastDate.Local().Format("2006-01-02"), balanceNum, balanceSum)
 	if _, err = f.WriteString(line); err != nil {
@@ -539,89 +463,34 @@ func (_b *BalanceParser) saveReport(_blockTime time.Time) {
 	log.Println("[REWARD]", line)
 }
 
-func (_b *BalanceParser) processTx(_t *btc.Tx, _wg *sync.WaitGroup) {
-	defer _wg.Done()
-
-	txID := *_t.Hash
-	if _t.IsCoinBase() {
-		if (_b.blockNO_+1)%HALVING_BLOCKS == 0 {
-			_b.halvingRate_ /= 2
-		}
-		reward := uint64(_b.halvingRate_ * MAX_REWARD)
-		_b.sumReward_ += reward
-		sumOut := uint64(0)
-		for _, v := range _t.TxOut {
-			sumOut += v.Value
-		}
-		fee := sumOut - reward
-		_b.sumFee_ += fee
-	} else {
-		for _, i := range _t.TxIn {
-			hash := *btc.NewUint256(i.Input.Hash[:])
-			index := uint16(i.Input.Vout)
-
-			var o tOutput
-			var unspent tOutputMap
-			var okUnspent, okOutput bool
-
-			_b.unspentMapLock_.RLock()
-			unspent, okUnspent = _b.unspentMap_[hash]
-			if okUnspent {
-				o, okOutput = unspent[index]
-			}
-			_b.unspentMapLock_.RUnlock()
-
-			if okOutput {
-				_b.unspentMapLock_.Lock()
-				delete(unspent, index)
-				if len(unspent) == 0 {
-					delete(_b.unspentMap_, hash)
-				}
-				_b.unspentMapLock_.Unlock()
-
-				_b.balanceMapLock_.Lock()
-				if balance := _b.balanceMap_[o.addr] - o.val; balance <= 0 {
-					delete(_b.balanceMap_, o.addr)
-				} else {
-					_b.balanceMap_[o.addr] = balance
-				}
-				_b.balanceMapLock_.Unlock()
-			}
-		}
-	}
-
-	unspent := make(tOutputMap)
-	for i, o := range _t.TxOut {
-		if o.Value == 0 {
-			continue
-		}
-		index := uint16(i)
-		addr := ""
-		a := btc.NewAddrFromPkScript(o.Pk_script, false)
-		if a == nil {
-			addr = string(o.Pk_script)
-		} else {
-			addr = a.String()
-		}
-		val := uint64(o.Value)
-		_b.balanceMapLock_.Lock()
-		_b.balanceMap_[addr] = _b.balanceMap_[addr] + val
-		_b.balanceMapLock_.Unlock()
-		unspent[index] = tOutput{addr, val}
-	}
-	_b.unspentMapLock_.Lock()
-	_b.unspentMap_[txID] = unspent
-	_b.unspentMapLock_.Unlock()
-}
-
 func (_b *BalanceParser) processBalance() {
 	for change := range _b.balanceChangeCh_ {
-		if balance := int64(_b.balanceMap_[change.addr]) + change.change; balance > 0 {
-			_b.balanceMap_[change.addr] = uint64(balance)
+		account, ok := _b.accountMap_[change.addr]
+		if !ok {
+			account.time = uint32(change.time.Unix())
+		}
+
+		balance := int64(account.balance)
+		if balance > 1000 && change.change < 0 {
+			_b.reduceNum_ += 1
+			_b.reduceSum_ += uint64(-change.change)
+
+			t := time.Unix(int64(account.time), 0)
+			if t.Year() < 2010 {
+				_b.reduceNum2010_ += 1
+				_b.reduceSum2010_ += uint64(-change.change)
+
+			} else if t.Year() < 2014 {
+				_b.reduceNum2014_ += 1
+				_b.reduceSum2014_ += uint64(-change.change)
+			}
+		}
+
+		if balance += change.change; balance > 0 {
+			account.balance = uint64(balance)
+			_b.accountMap_[change.addr] = account
 		} else if balance == 0 {
-			delete(_b.balanceMap_, change.addr)
-		} else {
-			log.Fatalln(change.addr, change.change)
+			delete(_b.accountMap_, change.addr)
 		}
 	}
 
@@ -633,8 +502,8 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 
 	genesis := new(btc.Uint256)
 	prev := *genesis
-	lastMonth := time.January
 
+	lastLogTime := new(time.Time)
 	for {
 		if changeSet, ok := _b.prevMap_[prev]; ok {
 			block := changeSet.block
@@ -648,14 +517,24 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 			_b.sumFee_ += fee
 
 			blockTime := time.Unix(int64(block.BlockTime()), 0)
-
-			if blockTime.Month() != lastMonth {
+			if blockTime.Day() != lastLogTime.Day() {
 				close(_b.balanceChangeCh_)
 				<-_b.balanceReadyCh_
-				_b.saveReport(blockTime)
-				lastMonth = blockTime.Month()
-				_b.sumFee_ = 0
-				_b.sumReward_ = 0
+
+				_b.saveDayReport(blockTime)
+				_b.reduceNum_ = 0
+				_b.reduceSum_ = 0
+				_b.reduceNum2010_ = 0
+				_b.reduceSum2010_ = 0
+				_b.reduceNum2014_ = 0
+				_b.reduceSum2014_ = 0
+
+				if blockTime.Month() != lastLogTime.Month() {
+					_b.saveMonthReport(blockTime)
+					_b.sumFee_ = 0
+					_b.sumReward_ = 0
+				}
+				lastLogTime = &blockTime
 
 				_b.balanceChangeCh_ = make(chan *tBalanceChange)
 				go _b.processBalance()
@@ -664,7 +543,7 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 			// must first
 			for txID, outputs := range changeSet.balanceMap {
 				for _, output := range outputs {
-					_b.balanceChangeCh_ <- &tBalanceChange{output.addr, int64(output.val)}
+					_b.balanceChangeCh_ <- &tBalanceChange{output.addr, int64(output.val), blockTime}
 				}
 				_b.unspentMap_[txID] = outputs
 			}
@@ -674,7 +553,7 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 					for _, i := range spent {
 						if output, ok := unspent[i]; ok {
 							delete(unspent, i)
-							_b.balanceChangeCh_ <- &tBalanceChange{output.addr, -int64(output.val)}
+							_b.balanceChangeCh_ <- &tBalanceChange{output.addr, -int64(output.val), blockTime}
 						}
 					}
 					if len(unspent) == 0 {
