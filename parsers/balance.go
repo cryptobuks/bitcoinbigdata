@@ -349,7 +349,7 @@ func (_b *BalanceParser) saveDayReport(_blockTime time.Time) {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	defer f.Close()
+	defer f2010.Close()
 	line2010 := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum2010_, _b.reduceSum2010_)
 	f2010.WriteString(line2010)
 
@@ -358,11 +358,11 @@ func (_b *BalanceParser) saveDayReport(_blockTime time.Time) {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	defer f.Close()
+	defer f2014.Close()
 	line2014 := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum2014_, _b.reduceSum2014_)
 	f2014.WriteString(line2014)
 
-	log.Println("[REDUCE]", line)
+	log.Println("[REDUCE]", line, line2010, line2014)
 }
 
 func (_b *BalanceParser) saveMonthReport(_blockTime time.Time) {
