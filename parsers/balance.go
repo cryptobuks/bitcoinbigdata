@@ -189,7 +189,7 @@ func (_b *BalanceParser) Parse(_blockNO uint32, _dataDir string, _outDir string)
 	waitProcess.Add(1)
 	go _b.processBlock(waitProcess)
 
-	go _b.processBalance()
+	go _b.processBalance(nil)
 
 	os.RemoveAll(_outDir)
 	os.Mkdir(_outDir, os.ModePerm)
@@ -463,7 +463,7 @@ func (_b *BalanceParser) saveMonthReport(_blockTime time.Time) {
 	log.Println("[REWARD]", line)
 }
 
-func (_b *BalanceParser) processBalance() {
+func (_b *BalanceParser) processBalance(_blockTime *time.Time) {
 	for change := range _b.balanceChangeCh_ {
 		account, ok := _b.accountMap_[change.addr]
 		if !ok {
@@ -471,18 +471,22 @@ func (_b *BalanceParser) processBalance() {
 		}
 
 		balance := int64(account.balance)
-		if balance > 1000 && change.change < 0 {
-			_b.reduceNum_ += 1
-			_b.reduceSum_ += uint64(-change.change)
+		if balance >= 1000 && change.change < 0 && _blockTime != nil{
+			delta := time.Now().Sub(*_blockTime)
+			days := uint32(delta.Hours() / 24)
+			if days <= 720 {
+				_b.reduceNum_ += 1
+				_b.reduceSum_ += uint64(-change.change)
 
-			t := time.Unix(int64(account.time), 0)
-			if t.Year() < 2010 {
-				_b.reduceNum2010_ += 1
-				_b.reduceSum2010_ += uint64(-change.change)
+				t := time.Unix(int64(account.time), 0)
+				if t.Year() < 2010 {
+					_b.reduceNum2010_ += 1
+					_b.reduceSum2010_ += uint64(-change.change)
 
-			} else if t.Year() < 2014 {
-				_b.reduceNum2014_ += 1
-				_b.reduceSum2014_ += uint64(-change.change)
+				} else if t.Year() < 2014 {
+					_b.reduceNum2014_ += 1
+					_b.reduceSum2014_ += uint64(-change.change)
+				}
 			}
 		}
 
@@ -537,7 +541,7 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 				lastLogTime = &blockTime
 
 				_b.balanceChangeCh_ = make(chan *tBalanceChange)
-				go _b.processBalance()
+				go _b.processBalance(&blockTime)
 			}
 
 			// must first
