@@ -328,20 +328,14 @@ func FakeAddr(_script []byte) string {
 	return addr58
 }
 
-func (_b *BalanceParser) saveDayReport(_blockTime time.Time) {
-	delta := time.Now().Sub(_blockTime)
-	days := uint32(delta.Hours() / 24)
-	if days >= 720 {
-		return
-	}
-
+func (_b *BalanceParser) saveDayReport(_days uint32) {
 	fileName := fmt.Sprintf("%v/reduce.csv", _b.outDir_)
 	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModeAppend|os.ModePerm)
 	if err != nil {
 		log.Fatalln(err)
 	}
 	defer f.Close()
-	line := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum_, _b.reduceSum_)
+	line := fmt.Sprintf("%v,%v,%v\n", _days, _b.reduceNum_, _b.reduceSum_)
 	f.WriteString(line)
 
 	fileName2010 := fmt.Sprintf("%v/reduce2010.csv", _b.outDir_)
@@ -350,7 +344,7 @@ func (_b *BalanceParser) saveDayReport(_blockTime time.Time) {
 		log.Fatalln(err)
 	}
 	defer f2010.Close()
-	line2010 := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum2010_, _b.reduceSum2010_)
+	line2010 := fmt.Sprintf("%v,%v,%v\n", _days, _b.reduceNum2010_, _b.reduceSum2010_)
 	f2010.WriteString(line2010)
 
 	fileName2014 := fmt.Sprintf("%v/reduce2014.csv", _b.outDir_)
@@ -359,7 +353,7 @@ func (_b *BalanceParser) saveDayReport(_blockTime time.Time) {
 		log.Fatalln(err)
 	}
 	defer f2014.Close()
-	line2014 := fmt.Sprintf("%v,%v,%v\n", days, _b.reduceNum2014_, _b.reduceSum2014_)
+	line2014 := fmt.Sprintf("%v,%v,%v\n", _days, _b.reduceNum2014_, _b.reduceSum2014_)
 	f2014.WriteString(line2014)
 
 	log.Println("[REDUCE]", line, line2010, line2014)
@@ -479,11 +473,11 @@ func (_b *BalanceParser) processBalance(_blockTime *time.Time) {
 				_b.reduceSum_ += uint64(-change.change)
 
 				t := time.Unix(int64(account.time), 0)
-				if t.Year() < 2010 {
+				if t.Year() <= 2010 {
 					_b.reduceNum2010_ += 1
 					_b.reduceSum2010_ += uint64(-change.change)
 
-				} else if t.Year() < 2014 {
+				} else if t.Year() <= 2014 {
 					_b.reduceNum2014_ += 1
 					_b.reduceSum2014_ += uint64(-change.change)
 				}
@@ -525,13 +519,16 @@ func (_b *BalanceParser) processBlock(_wg *sync.WaitGroup) {
 				close(_b.balanceChangeCh_)
 				<-_b.balanceReadyCh_
 
-				_b.saveDayReport(blockTime)
-				_b.reduceNum_ = 0
-				_b.reduceSum_ = 0
-				_b.reduceNum2010_ = 0
-				_b.reduceSum2010_ = 0
-				_b.reduceNum2014_ = 0
-				_b.reduceSum2014_ = 0
+				delta := time.Now().Sub(blockTime)
+				if days := uint32(delta.Hours() / 24); days < 720 {
+					_b.saveDayReport(days)
+					_b.reduceNum_ = 0
+					_b.reduceSum_ = 0
+					_b.reduceNum2010_ = 0
+					_b.reduceSum2010_ = 0
+					_b.reduceNum2014_ = 0
+					_b.reduceSum2014_ = 0
+				}
 
 				if blockTime.Month() != lastLogTime.Month() {
 					_b.saveMonthReport(blockTime)
