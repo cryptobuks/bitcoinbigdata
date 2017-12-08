@@ -179,15 +179,15 @@ func (_c *ChainStateParser) parseUTXO(_key, _val []byte, _wg *sync.WaitGroup) {
 		height := uint32(code >> 1)
 		//codeBase := code & 1
 
-		dist := _c.bestHeight_ - height
-		if period := dist / 144; period < 720 {
-			_c.periodList_[period] += 1
-		} else {
-			_c.periodList_[720] += 1
-		}
-
 		amount, offset2 := lib.DeserializeVLQ(decrypted[offset1:])
 		amount = lib.DecompressTxOutAmount(amount)
+
+		dist := _c.bestHeight_ - height
+		if period := dist / 144; period < 720 {
+			_c.periodList_[period] += amount
+		} else {
+			_c.periodList_[720] += amount
+		}
 
 		script := lib.DecompressScript(decrypted[offset1+offset2:], 0)
 		addr := btc.NewAddrFromPkScript(script, false)
