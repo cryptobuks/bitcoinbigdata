@@ -6,7 +6,7 @@ import (
 	"log"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 
-	"github.com/forchain/bitcoinbigdata/lib"
+	"github.com/Newtrong/bitcoinbigdata/lib"
 	"encoding/hex"
 	"github.com/piotrnar/gocoin/lib/btc"
 	"sync"

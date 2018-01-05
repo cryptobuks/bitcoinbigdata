@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/forchain/bitcoinbigdata/parsers"
+	"github.com/Newtrong/bitcoinbigdata/parsers"
 	"flag"
 	"github.com/piotrnar/gocoin/lib/others/sys"
 	"log"

@@ -15,7 +15,7 @@ import (
 	"runtime"
 	"github.com/piotrnar/gocoin/lib/others/blockdb"
 	"time"
-	"github.com/forchain/bitcoinbigdata/lib"
+	"github.com/Newtrong/bitcoinbigdata/lib"
 )
 
 const (
